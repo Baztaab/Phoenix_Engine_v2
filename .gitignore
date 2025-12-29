@@ -5,3 +5,26 @@ dist/
 build/
 .pytest_cache/
 .mypy_cache/
+# --- Swiss Ephemeris / Ephemeris assets ---
+*.se1
+*.se2
+*.se3
+*.se0
+*.se
+fixstars.cat
+sefstars.txt
+seasnam.txt
+seorbel.txt
+seleapsec.txt
+ast_list.txt
+
+ephe/
+ephe/**
+eph/
+eph/**
+ephemeris/
+ephemeris/**
+data/ephe/
+data/ephe/**
+assets/ephe/
+assets/ephe/**
