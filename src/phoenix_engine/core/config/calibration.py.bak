@@ -1,0 +1,126 @@
+﻿"""
+Calibration contract (Single Source of Truth) for Swiss Ephemeris policies.
+
+Goals:
+- JHora parity friendliness (configurable)
+- Safe separation of concerns: policy lives here, infrastructure consumes it
+- Pydantic v2
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+from typing import Optional
+from pydantic import BaseModel, Field, ConfigDict
+
+
+class AyanamsaMode(str, Enum):
+    # Standard Swiss modes (mapped via SIDM_* constants in swisseph)
+    LAHIRI = "LAHIRI"
+    RAMAN = "RAMAN"
+    KRISHNAMURTI = "KRISHNAMURTI"
+    FAGAN_BRADLEY = "FAGAN_BRADLEY"
+
+    # Modern parity candidate (depends on swe build; keep as string to map safely)
+    TRUE_CITRA = "TRUE_CITRA"
+
+    # Fully user-defined
+    USER_DEFINED = "USER_DEFINED"
+
+
+class NodeMode(str, Enum):
+    MEAN = "MEAN"   # swe.MEAN_NODE
+    TRUE = "TRUE"   # swe.TRUE_NODE
+
+
+class HouseCalculationMode(str, Enum):
+    # Direct Swiss sidereal house calculation (houses_ex + FLG_SIDEREAL)
+    SIDEREAL_NATIVE = "SIDEREAL_NATIVE"
+    # Traditional/JHora-friendly: tropical houses then subtract ayanamsa
+    TROPICAL_DERIVED = "TROPICAL_DERIVED"
+
+
+class HouseSystem(str, Enum):
+    # Swiss house system letters
+    PLACIDUS = "P"
+    WHOLE_SIGN = "W"
+    EQUAL = "E"
+    PORPHYRY = "O"
+    KOCH = "K"
+    REGIOMONTANUS = "R"
+    CAMPANUS = "C"
+    # add as needed
+
+
+class SunriseType(str, Enum):
+    DISC_CENTER = "DISC_CENTER"
+    UPPER_LIMB = "UPPER_LIMB"
+
+
+class AtmosphericConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    pressure_mbar: float = 1013.25
+    temperature_c: float = 15.0
+
+
+class RiseSetPolicy(BaseModel):
+    """
+    Low-level rise/set policy. Maps cleanly to rsmi flags in swe.rise_trans.
+    """
+    model_config = ConfigDict(frozen=True)
+
+    sunrise_type: SunriseType = SunriseType.UPPER_LIMB
+    use_refraction: bool = True
+    atmosphere: AtmosphericConfig = Field(default_factory=AtmosphericConfig)
+
+
+class TopoConfig(BaseModel):
+    """
+    Swiss topo is a global state; we enable it per SwissSession.
+    """
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = True
+
+
+class PrecisionConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    use_microseconds: bool = True
+    use_truepos: bool = True  # swe.FLG_TRUEPOS
+    # Roundings to stabilize cache keys
+    jd_round: int = 9
+    lonlat_round: int = 6
+    alt_round: int = 1
+
+
+class AyanamsaConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    mode: AyanamsaMode = AyanamsaMode.LAHIRI
+
+    # Only meaningful when mode == USER_DEFINED
+    # (Swiss ignores t0/ayan_t0 for most standard modes)
+    t0: float = 0.0
+    ayan_t0: float = 0.0
+
+    # Optional override for TRUE_CITRA etc. if you want to pin exact SIDM int
+    # (helps when swe builds differ)
+    sidm_override: Optional[int] = None
+
+
+class CalibrationConfig(BaseModel):
+    """
+    Master configuration: all policy knobs are here.
+    """
+    model_config = ConfigDict(frozen=True)
+
+    ayanamsa: AyanamsaConfig = Field(default_factory=AyanamsaConfig)
+    nodes: NodeMode = NodeMode.TRUE
+
+    houses_mode: HouseCalculationMode = HouseCalculationMode.TROPICAL_DERIVED
+    house_system: HouseSystem = HouseSystem.PLACIDUS
+
+    rise_set: RiseSetPolicy = Field(default_factory=RiseSetPolicy)
+    topo: TopoConfig = Field(default_factory=TopoConfig)
+    precision: PrecisionConfig = Field(default_factory=PrecisionConfig)

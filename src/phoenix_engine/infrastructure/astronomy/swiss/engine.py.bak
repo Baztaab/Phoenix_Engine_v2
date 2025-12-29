@@ -1,0 +1,66 @@
+﻿"""
+Thin Swiss Ephemeris wrapper.
+No caching, no policy: just direct calls with explicit flags.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Tuple, Optional
+import swisseph as swe
+
+
+@dataclass(frozen=True)
+class CalcResult:
+    lon: float
+    lat: float
+    dist: float
+    speed_lon: float
+    speed_lat: float
+    speed_dist: float
+
+
+class SwissEngine:
+    def calc_ut(self, jd_ut: float, body_id: int, flags: int) -> CalcResult:
+        pos = swe.calc_ut(jd_ut, body_id, flags)[0]
+        return CalcResult(
+            lon=float(pos[0]),
+            lat=float(pos[1]),
+            dist=float(pos[2]),
+            speed_lon=float(pos[3]),
+            speed_lat=float(pos[4]),
+            speed_dist=float(pos[5]),
+        )
+
+    def get_ayanamsa_ex_ut(self, jd_ut: float, flags: int) -> float:
+        # returns (retflag, ayanamsa)
+        _retflag, ay = swe.get_ayanamsa_ex_ut(jd_ut, flags)
+        return float(ay)
+
+    def houses_ex(self, jd_ut: float, lat: float, lon: float, hsys: bytes, flags: int):
+        return swe.houses_ex(jd_ut, lat, lon, hsys, flags)
+
+    def houses(self, jd_ut: float, lat: float, lon: float, hsys: bytes):
+        return swe.houses(jd_ut, lat, lon, hsys)
+
+    def rise_trans(
+        self,
+        jd_ut: float,
+        body_id: int,
+        ephe_flags: int,
+        rsmi: int,
+        geopos: Tuple[float, float, float],
+        atpress: float,
+        attemp: float,
+    ):
+        # returns (res, tret)
+        return swe.rise_trans(jd_ut, body_id, "", ephe_flags, rsmi, geopos, atpress, attemp)
+
+    def set_ephe_path(self, path: str) -> None:
+        swe.set_ephe_path(path)
+
+    def set_sid_mode(self, sidm: int, t0: float, ayan_t0: float) -> None:
+        swe.set_sid_mode(sidm, t0, ayan_t0)
+
+    def set_topo(self, lon: float, lat: float, alt_m: float) -> None:
+        swe.set_topo(lon, lat, alt_m)

@@ -1,0 +1,155 @@
+$ErrorActionPreference = "Stop"
+$PkgRoot = "src\phoenix_engine"
+
+function Write-PyFile([string]$relativePath, [string]$content) {
+    $path = Join-Path $PkgRoot $relativePath
+    $dir = Split-Path $path -Parent
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    [System.IO.File]::WriteAllText($path, $content, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "✅ Wrote: $relativePath" -ForegroundColor Green
+}
+
+Write-PyFile "infrastructure\astronomy\swiss\engine.py" @'
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import List, Tuple, Any, Optional
+
+import swisseph as swe
+
+
+def _norm360(x: float) -> float:
+    x = x % 360.0
+    return x + 360.0 if x < 0 else x
+
+
+@dataclass(frozen=True)
+class PlanetResult:
+    lon: float
+    lat: float
+    dist: float
+    speed_lon: float
+    speed_lat: float
+    speed_dist: float
+
+
+class SwissEngine:
+    """Thin wrapper around pyswisseph functions, with signature-fallback guards."""
+
+    def set_ephe_path(self, path: str) -> None:
+        swe.set_ephe_path(path)
+
+    def set_sid_mode(self, sidm: int, t0: float, ayan_t0: float) -> None:
+        swe.set_sid_mode(sidm, t0, ayan_t0)
+
+    def set_topo(self, lon: float, lat: float, alt_m: float) -> None:
+        swe.set_topo(lon, lat, alt_m)
+
+    def get_ayanamsa_ex_ut(self, jd_ut: float, flags: int) -> float:
+        res = swe.get_ayanamsa_ex_ut(jd_ut, flags)
+        # pyswisseph returns (tret, ayan) in many builds
+        if isinstance(res, tuple) and len(res) > 1:
+            return float(res[1])
+        return float(res)
+
+    def calc_ut(self, jd_ut: float, body_id: int, flags: int) -> PlanetResult:
+        res = swe.calc_ut(jd_ut, body_id, flags)
+        xx = res[0]
+        return PlanetResult(
+            lon=_norm360(float(xx[0])),
+            lat=float(xx[1]),
+            dist=float(xx[2]),
+            speed_lon=float(xx[3]) if len(xx) > 3 else 0.0,
+            speed_lat=float(xx[4]) if len(xx) > 4 else 0.0,
+            speed_dist=float(xx[5]) if len(xx) > 5 else 0.0,
+        )
+
+    def houses_ex(
+        self, jd_ut: float, lat: float, lon: float, hsys: bytes, flags: int
+    ) -> Tuple[List[float], List[float]]:
+        cusps, ascmc = swe.houses_ex(jd_ut, lat, lon, hsys, flags)
+        return ([_norm360(float(c)) for c in cusps], [_norm360(float(a)) for a in ascmc])
+
+    # ---------------------------
+    # Robust rise_trans wrapper
+    # ---------------------------
+    def rise_trans(
+        self,
+        jd_ut: float,
+        body_id: int,
+        ephe_flags: int,
+        rsmi: int,
+        geopos: tuple,
+        atpress: float,
+        attemp: float,
+    ) -> Tuple[float, int]:
+        """
+        Portable wrapper:
+          - tries MUTANT(6 args), MODERN(8 args), LEGACY(7 args) signatures
+          - normalizes return order to (jd_time_float, ret_flag_int)
+        """
+        last_exc: Optional[BaseException] = None
+
+        # Strategy A: "mutant" 6-arg signature (no starname, no ephe_flags)
+        strategies = [
+            ("mutant_6", lambda: swe.rise_trans(jd_ut, body_id, rsmi, geopos, atpress, attemp)),
+            # Strategy B: modern 8-arg signature
+            ("modern_8", lambda: swe.rise_trans(jd_ut, body_id, "", ephe_flags, rsmi, geopos, atpress, attemp)),
+            # Strategy C1: legacy 7-arg signature with starname as string
+            ("legacy_7_str", lambda: swe.rise_trans(jd_ut, body_id, "", rsmi, geopos, atpress, attemp)),
+            # Strategy C2: legacy 7-arg signature with starname as int (some builds expect int)
+            ("legacy_7_int", lambda: swe.rise_trans(jd_ut, body_id, 0, rsmi, geopos, atpress, attemp)),
+        ]
+
+        res: Any = None
+        used: str = ""
+        for name, fn in strategies:
+            try:
+                res = fn()
+                used = name
+                break
+            except TypeError as e:
+                last_exc = e
+                continue
+
+        if res is None:
+            raise TypeError(
+                f"rise_trans signature mismatch. Tried: {[n for n,_ in strategies]}. Last error: {last_exc}"
+            )
+
+        # Normalize return: accept (tret, flag) OR (flag, tret) OR just tret
+        tret = None
+        flag = 0
+
+        if isinstance(res, tuple) and len(res) >= 2:
+            a, b = res[0], res[1]
+
+            # detect reversed order: (flag:int, tret:tuple)
+            if isinstance(a, int) and not isinstance(b, int):
+                flag = int(a)
+                tret = b
+            else:
+                tret = a
+                # sometimes b is int retflag
+                if isinstance(b, int):
+                    flag = int(b)
+                else:
+                    # some mutant builds might return something else; keep 0
+                    flag = 0
+        else:
+            tret = res
+            flag = 0
+
+        # Extract float jd from tret
+        if hasattr(tret, "__len__") and not isinstance(tret, (str, bytes)):
+            try:
+                jd_time = float(tret[0])
+            except Exception:
+                jd_time = float(tret)
+        else:
+            jd_time = float(tret)
+
+        return jd_time, flag
+'@
+
+Write-Host "`n🎉 engine.py patched: rise_trans is now multi-signature + normalized." -ForegroundColor Cyan

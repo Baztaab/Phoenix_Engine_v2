@@ -1,0 +1,7 @@
+﻿"""Domain enums (stable API)."""
+from enum import Enum
+
+class MotionState(str, Enum):
+    DIRECT = "Direct"
+    RETROGRADE = "Retrograde"
+    STATIONARY = "Stationary"

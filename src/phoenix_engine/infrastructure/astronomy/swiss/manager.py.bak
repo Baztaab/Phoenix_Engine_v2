@@ -1,0 +1,120 @@
+﻿"""
+SwissContextManager:
+- Owns the global lock (Swiss is global-stateful)
+- Applies calibration state once per *session* (not per planet)
+- Ensures ephemeris path exists and warns if empty (.se1 missing)
+"""
+
+from __future__ import annotations
+
+import os
+import warnings
+import threading
+from dataclasses import dataclass
+from typing import Optional
+
+import swisseph as swe
+
+from phoenix_engine.core.config.calibration import CalibrationConfig, AyanamsaMode
+from .engine import SwissEngine
+from .provider import EphemerisProvider
+
+
+_GLOBAL_SWISS_LOCK = threading.RLock()
+
+
+@dataclass(frozen=True)
+class SwissAssets:
+    ephe_path: str
+
+
+def _default_ephe_path() -> str:
+    # A reasonable default inside user home; you can change later
+    home = os.path.expanduser("~")
+    return os.path.join(home, ".phoenix_engine", "sweph")
+
+
+def ensure_ephemeris_path(ephe_path: Optional[str]) -> SwissAssets:
+    path = ephe_path or _default_ephe_path()
+    os.makedirs(path, exist_ok=True)
+
+    # Sol-9 Guard: empty folder trap → Swiss silently falls back to low-precision mode.
+    has_se1 = any(name.lower().endswith(".se1") for name in os.listdir(path)) if os.path.exists(path) else False
+    if not has_se1:
+        warnings.warn(
+            f"Swiss ephemeris path '{path}' is empty (no .se1 files). "
+            "Swiss Ephemeris may fall back to low-precision mode. "
+            "Download ephemeris files and place them in this folder.",
+            RuntimeWarning,
+        )
+
+    return SwissAssets(ephe_path=path)
+
+
+def _map_sidm(config: CalibrationConfig) -> tuple[int, float, float]:
+    """
+    Returns (sidm_int, t0, ayan_t0) respecting Swiss behavior:
+    - For standard modes, Swiss ignores t0/ayan_t0 → we pass 0,0
+    - For USER_DEFINED, we pass provided t0/ayan_t0
+    """
+    ay = config.ayanamsa
+
+    if ay.mode == AyanamsaMode.USER_DEFINED:
+        return int(swe.SIDM_USER), float(ay.t0), float(ay.ayan_t0)
+
+    if ay.sidm_override is not None:
+        return int(ay.sidm_override), 0.0, 0.0
+
+    # Map common names to swe.SIDM_* if available
+    attr = f"SIDM_{ay.mode.value}"
+    if hasattr(swe, attr):
+        return int(getattr(swe, attr)), 0.0, 0.0
+
+    # TRUE_CITRA isn't guaranteed to exist in every build; allow fallback.
+    # If missing, default to Lahiri (safe fallback) but keep it explicit.
+    if ay.mode == AyanamsaMode.TRUE_CITRA:
+        # Try common attribute names
+        for cand in ("SIDM_TRUE_CITRA", "SIDM_TRUE_CITRAH"):
+            if hasattr(swe, cand):
+                return int(getattr(swe, cand)), 0.0, 0.0
+
+    return int(swe.SIDM_LAHIRI), 0.0, 0.0
+
+
+class SwissSession:
+    """
+    Holds the Swiss lock for the entire computation block.
+    Use:
+        with SwissSession(calibration, ephe_path=...) as eph:
+            eph.planet(...)
+            eph.houses(...)
+            ...
+    """
+
+    def __init__(self, calibration: CalibrationConfig, *, ephe_path: Optional[str] = None):
+        self.calibration = calibration
+        self.assets = ensure_ephemeris_path(ephe_path)
+        self._engine = SwissEngine()
+        self._provider: Optional[EphemerisProvider] = None
+
+    def __enter__(self) -> EphemerisProvider:
+        _GLOBAL_SWISS_LOCK.acquire()
+
+        # 1) set ephemeris path
+        self._engine.set_ephe_path(self.assets.ephe_path)
+
+        # 2) set sidereal mode (global state)
+        sidm, t0, ayan_t0 = _map_sidm(self.calibration)
+        self._engine.set_sid_mode(sidm, t0, ayan_t0)
+
+        # 3) NOTE: topo global state is set per-call in provider (because it depends on observer)
+        self._provider = EphemerisProvider(engine=self._engine, calibration=self.calibration)
+        return self._provider
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        # Defensive cleanup: reset topo to 0 to avoid “leaking observer” across sessions
+        try:
+            self._engine.set_topo(0.0, 0.0, 0.0)
+        finally:
+            self._provider = None
+            _GLOBAL_SWISS_LOCK.release()

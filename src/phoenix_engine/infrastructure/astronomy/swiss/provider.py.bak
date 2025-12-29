@@ -1,0 +1,261 @@
+﻿"""
+EphemerisProvider:
+- Mandatory L1 cache (session-local) to avoid expensive C calls
+- Applies calibration policy (sidereal flag, truepos, node mode, house mode)
+- Keeps rise_trans ephe_flags separate from rsmi (CRITICAL)
+"""
+
+from __future__ import annotations
+
+from collections import OrderedDict
+from dataclasses import dataclass
+from typing import Any, Optional, Tuple
+
+import swisseph as swe
+
+from phoenix_engine.core.config.calibration import (
+    CalibrationConfig,
+    NodeMode,
+    HouseCalculationMode,
+    SunriseType,
+)
+from .engine import SwissEngine, CalcResult
+
+
+class _LRU:
+    def __init__(self, maxsize: int = 4096):
+        self.maxsize = maxsize
+        self._d: "OrderedDict[Any, Any]" = OrderedDict()
+
+    def get(self, key: Any) -> Any:
+        if key not in self._d:
+            return None
+        self._d.move_to_end(key)
+        return self._d[key]
+
+    def set(self, key: Any, value: Any) -> None:
+        self._d[key] = value
+        self._d.move_to_end(key)
+        if len(self._d) > self.maxsize:
+            self._d.popitem(last=False)
+
+
+def _norm360(x: float) -> float:
+    x = x % 360.0
+    return x if x >= 0 else x + 360.0
+
+
+@dataclass(frozen=True)
+class RiseSetResult:
+    # Swiss rise_trans returns (res, tret). tret is array-like; first element is time (JD UT).
+    jd_ut: float
+    raw: Any
+
+
+class EphemerisProvider:
+    def __init__(self, *, engine: SwissEngine, calibration: CalibrationConfig, cache_size: int = 8192):
+        self._engine = engine
+        self._cfg = calibration
+        self._cache = _LRU(maxsize=cache_size)
+
+    # ----------------------------
+    # Flags
+    # ----------------------------
+    def _planet_flags(self) -> int:
+        flags = int(swe.FLG_SWIEPH) | int(swe.FLG_SPEED)
+        if self._cfg.precision.use_truepos:
+            flags |= int(swe.FLG_TRUEPOS)
+        # sidereal planets (Vedic core)
+        flags |= int(swe.FLG_SIDEREAL)
+        return flags
+
+    def _rise_ephe_flags(self, *, topo: bool) -> int:
+        # For rise/set: keep it conservative; do not pass FLG_SIDEREAL.
+        flags = int(swe.FLG_SWIEPH)
+        if topo:
+            flags |= int(swe.FLG_TOPOCTR)
+        if self._cfg.precision.use_truepos:
+            flags |= int(swe.FLG_TRUEPOS)
+        return flags
+
+    # ----------------------------
+    # Helpers: rounding for cache keys
+    # ----------------------------
+    def _r_jd(self, jd: float) -> float:
+        return round(float(jd), self._cfg.precision.jd_round)
+
+    def _r_geo(self, lon: float, lat: float, alt_m: float) -> Tuple[float, float, float]:
+        return (
+            round(float(lon), self._cfg.precision.lonlat_round),
+            round(float(lat), self._cfg.precision.lonlat_round),
+            round(float(alt_m), self._cfg.precision.alt_round),
+        )
+
+    # ----------------------------
+    # Core computations
+    # ----------------------------
+    def ayanamsa(self, jd_ut: float) -> float:
+        key = ("ayanamsa", self._r_jd(jd_ut))
+        cached = self._cache.get(key)
+        if cached is not None:
+            return float(cached)
+
+        # For ayanamsa_ex_ut: flags here are ephemeris flags; sidereal not needed.
+        ay = self._engine.get_ayanamsa_ex_ut(jd_ut, int(swe.FLG_SWIEPH))
+        self._cache.set(key, ay)
+        return float(ay)
+
+    def planet(self, jd_ut: float, body_id: int, *, observer: Optional[Tuple[float, float, float]] = None) -> CalcResult:
+        """
+        Returns sidereal planet position & speed (lon/lat/dist + speeds).
+        Topo behavior:
+          - Must do the two-step dance: set_topo + FLG_TOPOCTR
+          - Only if observer provided and topo enabled.
+        """
+        topo_enabled = bool(self._cfg.topo.enabled and observer is not None)
+        flags = self._planet_flags()
+        if topo_enabled:
+            lon, lat, alt_m = observer
+            self._engine.set_topo(lon, lat, alt_m)
+            flags |= int(swe.FLG_TOPOCTR)
+
+        # Node policy:
+        if body_id in (int(swe.MEAN_NODE), int(swe.TRUE_NODE)):
+            # caller passed explicit id; keep it
+            pass
+
+        key = ("calc_ut", self._r_jd(jd_ut), int(body_id), int(flags), self._r_geo(*observer) if topo_enabled else None)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+
+        res = self._engine.calc_ut(jd_ut, body_id, flags)
+        self._cache.set(key, res)
+        return res
+
+    def rahu(self, jd_ut: float, *, observer: Optional[Tuple[float, float, float]] = None) -> CalcResult:
+        body = int(swe.TRUE_NODE) if self._cfg.nodes == NodeMode.TRUE else int(swe.MEAN_NODE)
+        return self.planet(jd_ut, body, observer=observer)
+
+    def ketu(self, jd_ut: float, *, observer: Optional[Tuple[float, float, float]] = None) -> CalcResult:
+        # Ketu = Rahu + 180 (same speed sign), simplest to compute from Rahu result
+        r = self.rahu(jd_ut, observer=observer)
+        return CalcResult(
+            lon=_norm360(r.lon + 180.0),
+            lat=-r.lat,  # traditional: node latitude mirrored; if you prefer exact calc, compute separately
+            dist=r.dist,
+            speed_lon=r.speed_lon,
+            speed_lat=r.speed_lat,
+            speed_dist=r.speed_dist,
+        )
+
+    def houses(self, jd_ut: float, lat: float, lon: float, *, hsys: Optional[bytes] = None):
+        """
+        Houses:
+        - SIDEREAL_NATIVE: houses_ex(..., FLG_SIDEREAL)
+        - TROPICAL_DERIVED: tropical houses_ex(..., no sidereal) then subtract ayanamsa manually
+        """
+        hsys_b = hsys or self._cfg.house_system.value.encode("ascii")
+
+        if self._cfg.houses_mode == HouseCalculationMode.SIDEREAL_NATIVE:
+            flags = int(swe.FLG_SWIEPH) | int(swe.FLG_SIDEREAL)
+            key = ("houses_native", self._r_jd(jd_ut), round(lat, 6), round(lon, 6), hsys_b, flags)
+            cached = self._cache.get(key)
+            if cached is not None:
+                return cached
+
+            out = self._engine.houses_ex(jd_ut, lat, lon, hsys_b, flags)
+            self._cache.set(key, out)
+            return out
+
+        # TROPICAL_DERIVED
+        flags = int(swe.FLG_SWIEPH)
+        key = ("houses_derived", self._r_jd(jd_ut), round(lat, 6), round(lon, 6), hsys_b, flags)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+
+        cusps, ascmc = self._engine.houses_ex(jd_ut, lat, lon, hsys_b, flags)
+        ay = self.ayanamsa(jd_ut)
+
+        cusps_adj = [None]  # Swiss cusps is 1-indexed list-like; keep index 0 dummy
+        for i in range(1, len(cusps)):
+            cusps_adj.append(_norm360(float(cusps[i]) - ay))
+
+        ascmc_adj = []
+        for v in ascmc:
+            ascmc_adj.append(_norm360(float(v) - ay))
+
+        out = (cusps_adj, ascmc_adj)
+        self._cache.set(key, out)
+        return out
+
+    def rise_set(
+        self,
+        jd_ut: float,
+        body_id: int,
+        *,
+        lon: float,
+        lat: float,
+        alt_m: float = 0.0,
+        event: str = "rise",  # "rise" | "set"
+    ) -> RiseSetResult:
+        """
+        Swiss rise_trans signature:
+            rise_trans(tjd_ut, ipl, starname, epheflag, rsmi, geopos, atpress, attemp)
+
+        Critical rule:
+        - ephe_flags != rsmi (never mix them)
+        """
+        topo_enabled = bool(self._cfg.topo.enabled)
+        geopos = (float(lon), float(lat), float(alt_m))
+
+        ephe_flags = self._rise_ephe_flags(topo=topo_enabled)
+
+        # Build rsmi (event + disc policy + refraction)
+        if event.lower() == "set":
+            rsmi = int(swe.CALC_SET)
+        else:
+            rsmi = int(swe.CALC_RISE)
+
+        if self._cfg.rise_set.sunrise_type == SunriseType.DISC_CENTER:
+            rsmi |= int(swe.BIT_DISC_CENTER)
+        else:
+            # Upper limb: Swiss uses “disc bottom touches horizon”
+            rsmi |= int(swe.BIT_DISC_BOTTOM)
+
+        if not self._cfg.rise_set.use_refraction:
+            rsmi |= int(swe.BIT_NO_REFRACTION)
+
+        atpress = float(self._cfg.rise_set.atmosphere.pressure_mbar)
+        attemp = float(self._cfg.rise_set.atmosphere.temperature_c)
+
+        # Cache key: round geopos to avoid float-noise cache misses
+        key = (
+            "rise_set",
+            self._r_jd(jd_ut),
+            int(body_id),
+            event.lower(),
+            int(ephe_flags),
+            int(rsmi),
+            self._r_geo(*geopos),
+            round(atpress, 2),
+            round(attemp, 1),
+        )
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+
+        res, tret = self._engine.rise_trans(
+            jd_ut=jd_ut,
+            body_id=body_id,
+            ephe_flags=ephe_flags,
+            rsmi=rsmi,
+            geopos=geopos,
+            atpress=atpress,
+            attemp=attemp,
+        )
+        # tret[0] is the event time JD (UT)
+        out = RiseSetResult(jd_ut=float(tret[0]), raw=(res, tret))
+        self._cache.set(key, out)
+        return out
