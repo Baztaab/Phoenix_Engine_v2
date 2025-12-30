@@ -1,35 +1,45 @@
-﻿__pycache__/
-*.pyc
+﻿# =========================
+# Python / tooling junk
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+
 .venv/
+venv/
+env/
+
 dist/
 build/
+*.egg-info/
+
 .pytest_cache/
 .mypy_cache/
-# --- Swiss Ephemeris / Ephemeris assets ---
+.cache/
+.coverage
+htmlcov/
+
+# =========================
+# Swiss Ephemeris assets
+# =========================
+# Folder patterns (common locations)
+ephe/
+eph/
+ephemeris/
+data/ephe/
+assets/ephe/
+
+# File patterns
+*.se0
 *.se1
 *.se2
 *.se3
-*.se0
 *.se
+
+# Swiss text/catalog files (keep scoped by name, not *.txt globally)
 fixstars.cat
 sefstars.txt
 seasnam.txt
 seorbel.txt
 seleapsec.txt
 ast_list.txt
-
-ephe/
-ephe/**
-eph/
-eph/**
-ephemeris/
-ephemeris/**
-data/ephe/
-data/ephe/**
-assets/ephe/
-assets/ephe/**
-# Swiss ephemeris assets (DO NOT COMMIT)
-ephe/
-*.se0
-*.se1
-*.se2
