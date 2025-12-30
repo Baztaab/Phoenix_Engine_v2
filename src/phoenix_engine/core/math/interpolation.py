@@ -1,8 +1,8 @@
-"""Interpolation helpers for Panchanga calculations."""
-
 from __future__ import annotations
 
-from typing import Iterable, List, Optional
+"""Interpolation helpers for Panchanga calculations."""
+
+from typing import Iterable, List
 
 
 def inverse_lagrange(
@@ -13,32 +13,21 @@ def inverse_lagrange(
     max_points: int = 5,
     eps: float = 1e-10,
 ) -> float:
-    """
-    Inverse Lagrange interpolation: estimate x such that y(x)=y_target
-    given sample pairs (x_i, y_i).
+    """Inverse Lagrange interpolation: estimate x such that y(x)=y_target.
 
-    Numerically-stable implementation:
+    Numerically safer for Panchanga use:
     - Uses barycentric Lagrange form for x as a function of y.
-    - Uses only the max_points nearest samples to y_target (local fit).
+    - Uses only up to `max_points` nearest samples to y_target (local fit).
     - Handles exact-hit nodes and detects duplicate/near-duplicate y.
-
-    Args:
-        x_list, y_list: sample points (must be same length).
-        y_target: desired y value.
-        max_points: number of nearest samples to use (>=2). Default 5 is ideal for Panchanga.
-        eps: tolerance for node hit / duplicate detection.
-
-    Raises:
-        ValueError: bad input, insufficient points, or duplicate/near-duplicate y values.
-        ZeroDivisionError: ill-conditioned evaluation.
     """
-    xs = [float(v) for v in x_list]
-    ys = [float(v) for v in y_list]
+    xs: List[float] = [float(v) for v in x_list]
+    ys: List[float] = [float(v) for v in y_list]
+
     if len(xs) != len(ys):
         raise ValueError("x_list and y_list must be the same length.")
     n = len(xs)
     if n < 2:
-        raise ValueError("Need at least 2 points for interpolation.")
+        raise ValueError("Need at least 2 points for inverse interpolation.")
 
     k = max(2, int(max_points))
     if n > k:
@@ -49,18 +38,18 @@ def inverse_lagrange(
 
     yt = float(y_target)
 
-    # Exact-hit short-circuit
+    # exact-hit shortcut
     for xi, yi in zip(xs, ys):
         if abs(yt - yi) <= eps:
             return xi
 
-    # Duplicate/near-duplicate y detection (ill-defined)
+    # duplicate/near-duplicate y check
     for i in range(n):
         for j in range(i + 1, n):
             if abs(ys[i] - ys[j]) <= eps:
-                raise ValueError("Duplicate/near-duplicate y values; inverse Lagrange is ill-defined.")
+                raise ValueError("Duplicate/near-duplicate y values; inverse interpolation is ill-defined.")
 
-    # Barycentric weights in y-domain: w_i = 1 / Π_{j≠i}(y_i - y_j)
+    # barycentric weights in y-domain: w_i = 1 / Π_{j≠i}(y_i - y_j)
     w: List[float] = []
     for i in range(n):
         denom = 1.0
@@ -69,9 +58,11 @@ def inverse_lagrange(
             if j == i:
                 continue
             denom *= (yi - ys[j])
+        if abs(denom) <= eps:
+            raise ZeroDivisionError("Ill-conditioned inverse interpolation (denominator too small).")
         w.append(1.0 / denom)
 
-    # Evaluate barycentric rational form
+    # evaluate barycentric rational form
     num = 0.0
     den = 0.0
     for xi, yi, wi in zip(xs, ys, w):
@@ -80,6 +71,9 @@ def inverse_lagrange(
         den += t
 
     if abs(den) <= eps:
-        raise ZeroDivisionError("Ill-conditioned interpolation: denominator too small.")
+        raise ZeroDivisionError("Ill-conditioned inverse interpolation (final denominator too small).")
 
     return num / den
+
+
+__all__ = ["inverse_lagrange"]

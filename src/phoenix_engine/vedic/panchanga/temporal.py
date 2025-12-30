@@ -1,74 +1,54 @@
 from __future__ import annotations
 
+\"\"\"Temporal helpers for Panchanga calculations.\"\"\"
+
 from typing import Tuple
 
+from phoenix_engine.core.math.angles import normalize_angle
 
-def norm_deg(d: float) -> float:
-    d = d % 360.0
-    return d + 360.0 if d < 0 else d
-
-
-def tithi_continuous(
-    moon_lon: float,
-    moon_spd: float,
-    sun_lon: float,
-    sun_spd: float,
-) -> Tuple[float, float]:
-    """
-    Returns (tithi_index, tithi_speed_per_day).
-    Index is continuous in [0, 30). 1 tithi = 12 degrees of (Moon - Sun).
-    """
-    dist = norm_deg(moon_lon - sun_lon)        # 0..360
-    rel_speed = moon_spd - sun_spd             # deg/day
-    val = dist / 12.0                          # 0..30
-    speed = rel_speed / 12.0                   # tithi/day
-    return val, speed
+ONE_STAR = 360.0 / 27.0
+ONE_PADA = 360.0 / 108.0
 
 
-def nakshatra_continuous(
-    moon_lon: float,
-    moon_spd: float,
-) -> Tuple[float, float]:
-    """
-    Returns (nak_index, nak_speed_per_day).
-    Nakshatra is 27 divisions: 360/27 = 13.333... degrees.
-    """
+def tithi_continuous(moon_lon: float, moon_spd: float, sun_lon: float, sun_spd: float) -> Tuple[float, float]:
+    \"\"\"Return (tithi_index, tithi_speed_per_day).
+
+    1 tithi = 12 degrees of (Moon - Sun). Index in [0, 30).
+    \"\"\"
+    dist = normalize_angle(moon_lon - sun_lon, start=0.0, period=360.0)
+    rel_speed = moon_spd - sun_spd
+    return dist / 12.0, rel_speed / 12.0
+
+
+def nakshatra_continuous(moon_lon: float, moon_spd: float) -> Tuple[float, float]:
+    \"\"\"Return (nak_index, nak_speed_per_day) with 27 divisions.\"\"\"
     scale = 27.0 / 360.0
-    val = norm_deg(moon_lon) * scale
-    speed = moon_spd * scale
-    return val, speed
+    lon = normalize_angle(moon_lon, start=0.0, period=360.0)
+    return lon * scale, moon_spd * scale
 
 
-def yoga_continuous(
-    moon_lon: float,
-    moon_spd: float,
-    sun_lon: float,
-    sun_spd: float,
-) -> Tuple[float, float]:
-    """
-    Returns (yoga_index, yoga_speed_per_day).
-    Yoga uses (Moon + Sun) over 27 divisions.
-    """
+def yoga_continuous(moon_lon: float, moon_spd: float, sun_lon: float, sun_spd: float) -> Tuple[float, float]:
+    \"\"\"Return (yoga_index, yoga_speed_per_day) where yoga uses (Moon + Sun) over 27.\"\"\"
     scale = 27.0 / 360.0
-    s = norm_deg(moon_lon + sun_lon)
+    s = normalize_angle(moon_lon + sun_lon, start=0.0, period=360.0)
     spd = moon_spd + sun_spd
-    val = s * scale
-    speed = spd * scale
-    return val, speed
+    return s * scale, spd * scale
 
-def unwrap_relative(val: float, target: float, period: float = 360.0) -> float:
-    """
-    Unwrap `val` (modulo `period`) to be continuous around `target`.
 
-    Example:
-      target=359.9, val=0.1  -> 360.1
-      target=0.1,   val=359.9 -> -0.1
+def nakshatra_pada_from_longitude(lon_deg: float) -> tuple[int, int, float]:
+    \"\"\"Return (nakshatra_no, pada_no, remainder) from sidereal longitude.\"\"\"
+    lon = normalize_angle(lon_deg, start=0.0, period=360.0)
+    quotient = int(lon / ONE_STAR)
+    remainder = lon % ONE_STAR
+    pada = int(remainder / ONE_PADA)
+    return 1 + quotient, 1 + pada, remainder
 
-    This keeps (val - target) in [-period/2, +period/2].
-    """
-    val = float(val)
-    target = float(target)
-    period = float(period)
-    diff = (val - target + period / 2.0) % period - period / 2.0
-    return target + diff
 
+__all__ = [
+    "ONE_PADA",
+    "ONE_STAR",
+    "nakshatra_pada_from_longitude",
+    "nakshatra_continuous",
+    "tithi_continuous",
+    "yoga_continuous",
+]
