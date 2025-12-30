@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-\"\"\"Panchanga event facade.
+"""Panchanga event facade.
 
 - Solver-based continuous events: PanchangaFinder
 - Sunrise-anchored nakshatra facade: nakshatra() (TODO wiring per nakshatra.md)
-\"\"\"
+"""
 
 from typing import List
 

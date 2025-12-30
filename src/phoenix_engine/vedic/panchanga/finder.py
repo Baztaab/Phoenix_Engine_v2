@@ -116,7 +116,7 @@ def _get_nakshatra_end_hours(
     gregorian_to_jd_fn: Optional[Callable] = None,
     moon_id: Optional[int] = None,
 ) -> List[float]:
-    \"\"\"Compute nakshatra end times anchored to sunrise.
+    """Compute nakshatra end times anchored to sunrise.
 
     TODO (PyJHora method): مطابق nakshatra.md
     - jd_utc = jd - tz/24
@@ -124,7 +124,7 @@ def _get_nakshatra_end_hours(
     - sample Moon lon at rise + [0, .25, .5, .75, 1.0]
     - unwrap/extend angles
     - inverse_lagrange for boundary (nak * ONE_STAR)
-    \"\"\"
+    """
     if sunrise_fn is None:
         raise NotImplementedError("TODO: inject sunrise_fn (see nakshatra.md)")
     if sidereal_longitude_fn is None:
