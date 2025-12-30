@@ -28,3 +28,8 @@ data/ephe/
 data/ephe/**
 assets/ephe/
 assets/ephe/**
+# Swiss ephemeris assets (DO NOT COMMIT)
+ephe/
+*.se0
+*.se1
+*.se2
